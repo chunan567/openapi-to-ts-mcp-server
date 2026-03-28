@@ -1,0 +1,42 @@
+{
+  "name": "openapi-to-ts-mcp-server",
+  "version": "0.1.0",
+  "description": "MCP server for generating TypeScript/JavaScript API client code from OpenAPI 3.0 specs",
+  "bin": {
+    "openapi-to-ts-mcp-server": "./bin.js"
+  },
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": ["dist", "bin.js"],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start": "node dist/index.js",
+    "prepublishOnly": "tsc"
+  },
+  "keywords": ["mcp", "openapi", "typescript", "codegen", "api-client", "model-context-protocol"],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/anthropics/openapi-to-ts-mcp-server.git"
+  },
+  "homepage": "https://github.com/anthropics/openapi-to-ts-mcp-server#readme",
+  "bugs": {
+    "url": "https://github.com/anthropics/openapi-to-ts-mcp-server/issues"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "openapi-types": "^12.1.3",
+    "radash": "^12.1.1",
+    "openai": "^4.97.0",
+    "zod": "^3.24.4"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.3",
+    "@types/node": "^22.15.3"
+  }
+}
