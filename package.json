@@ -22,11 +22,11 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/anthropics/openapi-to-ts-mcp-server.git"
+    "url": "git+https://github.com/chunan567/openapi-to-ts-mcp-server.git"
   },
-  "homepage": "https://github.com/anthropics/openapi-to-ts-mcp-server#readme",
+  "homepage": "https://github.com/chunan567/openapi-to-ts-mcp-server#readme",
   "bugs": {
-    "url": "https://github.com/anthropics/openapi-to-ts-mcp-server/issues"
+    "url": "https://github.com/chunan567/openapi-to-ts-mcp-server/issues"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
