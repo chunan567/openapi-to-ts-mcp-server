@@ -1,6 +1,6 @@
 {
   "name": "openapi-to-ts-mcp-server",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "MCP server for generating TypeScript/JavaScript API client code from OpenAPI 3.0 specs",
   "bin": {
     "openapi-to-ts-mcp-server": "./bin.js"
@@ -8,7 +8,10 @@
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
-  "files": ["dist", "bin.js"],
+  "files": [
+    "dist",
+    "bin.js"
+  ],
   "engines": {
     "node": ">=18"
   },
@@ -18,7 +21,14 @@
     "start": "node dist/index.js",
     "prepublishOnly": "tsc"
   },
-  "keywords": ["mcp", "openapi", "typescript", "codegen", "api-client", "model-context-protocol"],
+  "keywords": [
+    "mcp",
+    "openapi",
+    "typescript",
+    "codegen",
+    "api-client",
+    "model-context-protocol"
+  ],
   "license": "MIT",
   "repository": {
     "type": "git",
