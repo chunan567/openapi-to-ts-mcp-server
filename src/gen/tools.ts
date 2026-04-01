@@ -35,13 +35,17 @@ function filterCharacters(charsToFilter: string[], inputString?: string): string
  * Create a $ref resolver bound to a specific OpenAPI document
  */
 export const createRefResolver = <T>(spec: OpenAPIV3.Document) => {
-  const resolver = (ref?: string): [schemaObject?: T, modelName?: string] => {
+  const resolver = (ref?: string, _visited?: Set<string>): [schemaObject?: T, modelName?: string] => {
     if (!ref) return [];
+    // 每次顶层调用创建新的 visited Set，递归链内共享
+    const visited = _visited ?? new Set<string>();
+    if (visited.has(ref)) return []; // 循环引用检测
+    visited.add(ref);
     const path = ref.replace(/^#\//, '').replace(/\//g, '.');
     const result = get<Record<string, any>>(spec as any, path);
     if (!result) return [];
     if ('$ref' in result) {
-      return resolver(result.$ref);
+      return resolver(result.$ref, visited);
     }
     const modelName = path.split('.').pop();
     const newModelName = filterCharacters(['«', '»'], modelName);

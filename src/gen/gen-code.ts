@@ -1,6 +1,6 @@
 import type { OpenAPIV3 } from 'openapi-types';
 import type { GenCodeOptions, GenMetadata, FilteredPath } from '../types.js';
-import { convertPathTemplate, getFnName, getUrlKey, removeTrailingBrackets, toCamelCase } from './tools.js';
+import { convertPathTemplate, createRefResolver, getFnName, getUrlKey, removeTrailingBrackets, toCamelCase } from './tools.js';
 import {
   getParametersPathType,
   getParametersQueryType,
@@ -124,6 +124,9 @@ type CreateTypesHandlersOptions = {
 function createTypesHandlers(options: CreateTypesHandlersOptions) {
   const { spec, pathObj, genContext, typeCode } = options;
 
+  // 每个 endpoint 共享一个 $ref 解析器，避免重复创建
+  const resolveRef = createRefResolver(spec);
+
   function typeAnnotations(moduleName: string, text: string) {
     if (!typeCode.has(moduleName) || moduleName === 'AnyObject') return;
     const code = typeCode.get(moduleName)!;
@@ -137,7 +140,7 @@ function createTypesHandlers(options: CreateTypesHandlersOptions) {
         (item) => (item as OpenAPIV3.ParameterObject).in === 'path',
       );
       if (!isParams) return;
-      const [type] = getParametersPathType({ spec, genContext, parameters: pathObj.parameters, typeCode });
+      const [type] = getParametersPathType({ spec, genContext, parameters: pathObj.parameters, typeCode, resolveRef });
       const [name] = removeTrailingBrackets(type);
       typeAnnotations(name, `${genContext.summary} - path 参数`);
       genContext.fnArgs.push({ name: 'path', type, independent: true, required: true });
@@ -149,28 +152,30 @@ function createTypesHandlers(options: CreateTypesHandlersOptions) {
         (item) => (item as OpenAPIV3.ParameterObject).in === 'query',
       );
       if (!isParams) return;
-      const [type, independent] = getParametersQueryType({ spec, genContext, parameters: pathObj.parameters, typeCode });
+      const [type, independent, hasRequired] = getParametersQueryType({ spec, genContext, parameters: pathObj.parameters, typeCode, resolveRef });
       if (independent) {
         const [name] = removeTrailingBrackets(type);
         typeAnnotations(name, `${genContext.summary} - params 参数`);
       }
-      genContext.fnArgs.push({ name: 'params', type, independent: !!independent, insertStatement: 'params,', required: true });
+      genContext.fnArgs.push({ name: 'params', type, independent: !!independent, insertStatement: 'params,', required: !!hasRequired });
     },
 
     // Body params
     () => {
       if (!pathObj.requestBody) return;
-      const [type, independent] = getRequestBodyType({ spec, genContext, requestBody: pathObj.requestBody, typeCode });
+      const [type, independent] = getRequestBodyType({ spec, genContext, requestBody: pathObj.requestBody, typeCode, resolveRef });
       if (independent) {
         const [name] = removeTrailingBrackets(type);
         typeAnnotations(name, `${genContext.summary} - body 参数`);
       }
-      genContext.fnArgs.push({ name: 'data', type, independent: !!independent, insertStatement: 'data,', required: true });
+      // 根据 OpenAPI requestBody.required 字段决定是否必填（默认 true）
+      const isRequired = !('$ref' in pathObj.requestBody) && pathObj.requestBody.required !== false;
+      genContext.fnArgs.push({ name: 'data', type, independent: !!independent, insertStatement: 'data,', required: isRequired });
     },
 
     // Response type
     () => {
-      const [type, independent] = getResponsesType({ spec, genContext, responses: pathObj.responses, typeCode });
+      const [type, independent] = getResponsesType({ spec, genContext, responses: pathObj.responses, typeCode, resolveRef });
       if (independent) {
         const [name] = removeTrailingBrackets(type);
         typeAnnotations(name, `${genContext.summary} - 响应参数`);

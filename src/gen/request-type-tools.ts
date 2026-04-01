@@ -6,6 +6,9 @@ import { convertParametersToSchema, createRefResolver } from './tools.js';
 import type { OpenAPIV3 } from 'openapi-types';
 import type { GenMetadata, FilteredPath } from '../types.js';
 
+/** 通用 $ref 解析器类型 */
+type RefResolver = (ref?: string) => [schemaObject?: any, modelName?: string];
+
 type GetRequestBodyTypeArgs = {
   /** openapi spec */
   spec: OpenAPIV3.Document;
@@ -17,6 +20,8 @@ type GetRequestBodyTypeArgs = {
   typeCode: Map<string, string>;
   /** 数据模型名称 */
   modelName?: string;
+  /** 共享的 $ref 解析器 */
+  resolveRef?: RefResolver;
 };
 
 /**
@@ -33,8 +38,7 @@ const getRequestBodyType = (
 
   // 处理外部定义的 requestBody components.requestBodies.xxx
   if ('$ref' in requestBody) {
-    const resolveRef =
-      createRefResolver<OpenAPIV3.OperationObject['requestBody']>(options.spec);
+    const resolveRef = options.resolveRef ?? createRefResolver(options.spec);
     const [schemaObject, $_modelName] = resolveRef(requestBody.$ref);
     return getRequestBodyType({
       ...options,
@@ -76,44 +80,58 @@ type GetParametersTypeArgs = {
   genContext: GenMetadata;
   /** ts 类型 Map */
   typeCode: Map<string, string>;
+  /** 共享的 $ref 解析器 */
+  resolveRef?: RefResolver;
 };
 
 /**
- * 处理 params 类型
+ * 处理参数类型（通用）
  */
-const getParametersQueryType = (
+function getParametersType(
   options: GetParametersTypeArgs,
-): [type: string, independent?: boolean] => {
+  filterIn: 'query' | 'path',
+  typeSuffix: string,
+): [type: string, independent?: boolean, hasRequired?: boolean] {
   const { genContext, parameters, typeCode } = options;
 
-  const resolveRef = createRefResolver<OpenAPIV3.ParameterObject>(options.spec);
+  const resolveRef = options.resolveRef ?? createRefResolver(options.spec);
 
-  const newParameters: OpenAPIV3.ParameterObject[] = parameters!
+  const filtered: OpenAPIV3.ParameterObject[] = parameters!
     .map((item) => {
       if ('$ref' in item) {
         const [parameterObj] = resolveRef(item.$ref);
-        return parameterObj!;
+        return parameterObj as OpenAPIV3.ParameterObject | undefined;
       } else {
         return item;
       }
     })
-    .filter((item) => item.in === 'query');
+    .filter((item): item is OpenAPIV3.ParameterObject => item != null && item.in === filterIn);
 
-  const schemaObj = convertParametersToSchema(newParameters);
+  const hasRequired = filtered.some((p) => p.required);
+  const schemaObj = convertParametersToSchema(filtered);
 
   // 转换schema为类型声明
   const schemaToType = createSchemaToType({
     spec: options.spec,
     genContext,
     typeCode,
-    typeSuffix: 'query-form',
+    typeSuffix,
   });
 
   const { type, independent } = schemaToType({
     schema: schemaObj,
   });
 
-  return [type, independent];
+  return [type, independent, hasRequired];
+}
+
+/**
+ * 处理 params 类型
+ */
+const getParametersQueryType = (
+  options: GetParametersTypeArgs,
+): [type: string, independent?: boolean, hasRequired?: boolean] => {
+  return getParametersType(options, 'query', 'query-form');
 };
 
 type GetResponsesTypeArgs = {
@@ -127,6 +145,8 @@ type GetResponsesTypeArgs = {
   typeCode: Map<string, string>;
   /** 数据模型名称 */
   modelName?: string;
+  /** 共享的 $ref 解析器 */
+  resolveRef?: RefResolver;
 };
 
 /**
@@ -141,10 +161,20 @@ const getResponsesType = (
     typeCode,
     modelName,
   } = options;
-  const resolveRef = createRefResolver<OpenAPIV3.ResponsesObject>(options.spec);
+  const resolveRef = options.resolveRef ?? createRefResolver(options.spec);
 
-  if (responses['200'] && '$ref' in responses['200']) {
-    const [responsesObj, _modelName] = resolveRef(responses['200'].$ref);
+  // 按优先级查找响应状态码: 200 → 201 → default
+  const statusCode = responses['200'] ? '200'
+    : responses['201'] ? '201'
+    : responses['default'] ? 'default'
+    : null;
+
+  if (!statusCode) return ['any', false];
+
+  if ('$ref' in responses[statusCode]!) {
+    const [responsesObj, _modelName] = resolveRef(
+      (responses[statusCode] as OpenAPIV3.ReferenceObject).$ref,
+    );
 
     return getResponsesType({
       ...options,
@@ -153,9 +183,10 @@ const getResponsesType = (
     });
   }
 
+  const responseObj = responses[statusCode] as OpenAPIV3.ResponseObject;
   const jsonSchema =
-    responses['200']?.content?.['application/json']?.schema ??
-    responses['200']?.content?.['*/*']?.schema;
+    responseObj?.content?.['application/json']?.schema ??
+    responseObj?.content?.['*/*']?.schema;
 
   if (!jsonSchema) return ['any', false];
 
@@ -180,37 +211,8 @@ const getResponsesType = (
  */
 const getParametersPathType = (
   options: GetParametersTypeArgs,
-): [type: string, independent?: boolean] => {
-  const { genContext, parameters, typeCode } = options;
-
-  const resolveRef = createRefResolver<OpenAPIV3.ParameterObject>(options.spec);
-
-  const newParameters: OpenAPIV3.ParameterObject[] = parameters!
-    .map((item) => {
-      if ('$ref' in item) {
-        const [parameterObj] = resolveRef(item.$ref);
-        return parameterObj!;
-      } else {
-        return item;
-      }
-    })
-    .filter((item) => item.in === 'path');
-
-  const schemaObj = convertParametersToSchema(newParameters);
-
-  // 转换schema为类型声明
-  const schemaToType = createSchemaToType({
-    spec: options.spec,
-    genContext,
-    typeCode,
-    typeSuffix: 'path-form',
-  });
-
-  const { type, independent } = schemaToType({
-    schema: schemaObj,
-  });
-
-  return [type, independent];
+): [type: string, independent?: boolean, hasRequired?: boolean] => {
+  return getParametersType(options, 'path', 'path-form');
 };
 
 export {

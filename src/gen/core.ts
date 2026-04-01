@@ -34,8 +34,6 @@ type SchemaToOptions = {
   schema: OpenAPIV3.ReferenceObject | OpenAPIV3.SchemaObject | undefined;
   /** 数据模型名称 */
   modelName?: string;
-  /** 父级模型名称 */
-  parentModelName?: string;
   /** 递归类型 */
   handleType?: RecursiveType;
   /** 处理 object properties 递归时需要 传递字段名称 */
@@ -110,16 +108,40 @@ const createSchemaToType = (createOptions: CreateSchemaToTypeOptions) => {
   /** 缓存已处理过的 $ref 路径 */
   const seen$Ref = new Map<string, SchemaToReturn>();
 
+  /** $ref 递归栈，检测循环引用（支持 A→B→A 等多层级循环） */
+  const refStack = new Set<string>();
+
+  /** 注册类型到 typeCode Map（消除重复的类型注册模式） */
+  function registerType(name: string, body: string, desc?: string) {
+    let code = `export type ${name} = {\n${body}\n}`;
+    if (desc && name !== 'AnyObject') {
+      code = `/** ${desc} */\n${code}`;
+    }
+    typeCode.set(name, code);
+  }
+
   /**
    * jsonSchema to type
    * @param options
    * @returns
    */
   const schemaToType = (options: SchemaToOptions): SchemaToReturn => {
+    const result = schemaToTypeInner(options);
+
+    // nullable 统一处理：适用于所有类型（对象、数组、$ref 等）
+    const schema = options.schema;
+    if (schema && !('$ref' in schema) && schema.nullable && result.type !== 'any') {
+      return { ...result, type: `${result.type} | null` };
+    }
+
+    return result;
+  };
+
+  /** schemaToType 内部实现 */
+  const schemaToTypeInner = (options: SchemaToOptions): SchemaToReturn => {
     const {
       schema,
       modelName,
-      parentModelName,
       handleType,
       objKey,
       currentObjModelName,
@@ -127,20 +149,17 @@ const createSchemaToType = (createOptions: CreateSchemaToTypeOptions) => {
       ofIndex
     } = options;
 
-    /** 数据模型递归嵌套时直接返回数据模型名称 */
-    if (parentModelName && modelName === parentModelName) {
-      return {
-        type: modelName,
-        independent: true,
-        nested: true,
-      };
-    }
-
     /** jsonSchema 为空时类型默认为 any */
     if (!schema) return { type: 'any' };
 
-    /** 处理$ref引用类型 */
+    /** 处理$ref引用类型 — 循环检测基于 $ref 路径 */
     if ('$ref' in schema) {
+      // 循环引用检测：$ref 路径已在递归栈中，说明出现了 A→B→…→A 循环
+      if (refStack.has(schema.$ref)) {
+        const refModelName = toCamelCase(schema.$ref.split('/').pop(), true);
+        return { type: refModelName, independent: true, nested: true };
+      }
+
       if (seen$Ref.has(schema.$ref)) {
         // 处理的 $ref 直接返回结果，一个分组可能多个接口复用了这个 ref 不用多次处理
         return seen$Ref.get(schema.$ref)!;
@@ -149,19 +168,25 @@ const createSchemaToType = (createOptions: CreateSchemaToTypeOptions) => {
       // 解析ref引用
       const [resolved, $modelName] = resolveRef(schema.$ref);
 
-      const {
-        type: _modelName,
-        independent: _independent,
-        nested: _nested,
-        tdCode: _tdCode,
-      } = schemaToType({
-        schema: resolved,
-        description: (schema as OpenAPIV3.SchemaObject)?.description ? (schema as OpenAPIV3.SchemaObject)?.description : description,
-        modelName: toCamelCase($modelName, true),
-        parentModelName: modelName,
-        handleType: RecursiveType.REF,
-        ofIndex
-      });
+      // 将 $ref 路径加入递归栈，处理完后移除
+      refStack.add(schema.$ref);
+      let _modelName: string, _independent: boolean | undefined, _nested: boolean | undefined, _tdCode: string | undefined;
+      try {
+        ({
+          type: _modelName,
+          independent: _independent,
+          nested: _nested,
+          tdCode: _tdCode,
+        } = schemaToType({
+          schema: resolved,
+          description: (schema as OpenAPIV3.SchemaObject)?.description ? (schema as OpenAPIV3.SchemaObject)?.description : description,
+          modelName: toCamelCase($modelName, true),
+          handleType: RecursiveType.REF,
+          ofIndex
+        }));
+      } finally {
+        refStack.delete(schema.$ref);
+      }
 
       // 独立声明的类型
       if (_independent && _tdCode) {
@@ -170,14 +195,7 @@ const createSchemaToType = (createOptions: CreateSchemaToTypeOptions) => {
 
 
         // 添加类型到 Map 中
-        let code = `export type ${newModuleName} = {\n${_tdCode}\n}`;
-
-        /** 注释 */
-        if (description) {
-          code = newModuleName !== 'AnyObject' ? `/** ${description} */\n${code}` : code
-        }
-
-        typeCode.set(newModuleName, code);
+        registerType(newModuleName, _tdCode, description);
 
         const resObj = {
           type: isArr ? `${newModuleName}[]` : newModuleName,
@@ -211,7 +229,11 @@ const createSchemaToType = (createOptions: CreateSchemaToTypeOptions) => {
         _key = modelName
         _moduleName = modelName
       } else if (currentObjModelName) {
+        _key = currentObjModelName
         _moduleName = currentObjModelName
+      } else {
+        _key = genContext.fnName
+        _moduleName = genContext.fnName
       }
 
       if (objKey) {
@@ -252,7 +274,18 @@ const createSchemaToType = (createOptions: CreateSchemaToTypeOptions) => {
 
     /** 处理 allOf(多合一对应ts类型就是交叉类型) */
     if (schema.allOf?.length) {
-      return { type: handleComposition(schema.allOf, ' & ') };
+      const allOfType = handleComposition(schema.allOf, ' & ');
+
+      // OpenAPI 规范: allOf 旁边的 properties 应该合并
+      if (schema.properties && !isEmpty(schema.properties)) {
+        const propsResult = schemaToType({
+          ...options,
+          schema: { type: 'object', properties: schema.properties, required: schema.required } as OpenAPIV3.SchemaObject,
+        });
+        return { type: `${allOfType} & ${propsResult.type}`, independent: propsResult.independent };
+      }
+
+      return { type: allOfType };
     }
 
     /** 处理 anyOf(或-联合类型) */
@@ -276,7 +309,6 @@ const createSchemaToType = (createOptions: CreateSchemaToTypeOptions) => {
         schema: schema.items,
         description: schema?.description ? schema?.description : description,
         modelName,
-        parentModelName,
         handleType: RecursiveType.ARR,
         objKey,
         currentObjModelName,
@@ -307,9 +339,7 @@ const createSchemaToType = (createOptions: CreateSchemaToTypeOptions) => {
     /** 处理基本类型 */
     if (schema.type && baseTypes[schema.type]) {
       return {
-        type: schema.nullable
-          ? `${baseTypes[schema.type]} | null`
-          : baseTypes[schema.type],
+        type: baseTypes[schema.type],
       };
     }
 
@@ -317,6 +347,15 @@ const createSchemaToType = (createOptions: CreateSchemaToTypeOptions) => {
     if (schema.type === 'object') {
       if (isEmpty(schema.properties) || !schema.properties) {
         // properties 不存在，type 又等于 object
+
+        // 处理 additionalProperties（字典/Map类型）
+        if (schema.additionalProperties && schema.additionalProperties !== true) {
+          const { type: valueType } = schemaToType({
+            ...options,
+            schema: schema.additionalProperties,
+          });
+          return { type: `Record<string, ${valueType}>` };
+        }
 
         const code = `export type AnyObject = Record<string, any>`;
         typeCode.set(`AnyObject`, code);
@@ -336,116 +375,52 @@ const createSchemaToType = (createOptions: CreateSchemaToTypeOptions) => {
         };
       }
 
-      let props = '';
-      let _modelName = '';
-      let indexStr = ''
-      if (isNumber(ofIndex)) {
-        indexStr = `${ofIndex}`
-      }
+      const indexStr = isNumber(ofIndex) ? `${ofIndex}` : '';
+      const _modelName = modelName ?? toCamelCase(`${genContext.fnName}-${typeSuffix}`, true);
 
-      // 首次进来 modelName 存在或 ref modelName
-      if (modelName) {
-        _modelName = modelName;
-      } else {
-
-
-
-        // 否则使用函数名作为默认 type 类型名称
-        const name = toCamelCase(`${genContext.fnName}-${typeSuffix}`, true);
-
-        _modelName = name;
-      }
-
-      props = Object.entries(schema.properties)
+      // 递归处理每个属性
+      const props = Object.entries(schema.properties)
         .map(([key, value]) => {
-          // 必填字段
           const isRequired = schema.required?.includes(key);
-
           const { type: propType } = schemaToType({
             schema: value,
             description: (value as OpenAPIV3.SchemaObject)?.description ? (value as OpenAPIV3.SchemaObject)?.description : description,
             modelName,
-            parentModelName,
             handleType: RecursiveType.OBJ,
             objKey: objKey ? toCamelCase(`${objKey}_${key}`, true) : key,
             currentObjModelName: _modelName,
             ofIndex
           });
-
           const exegesis = getExegesis(value as OpenAPIV3.BaseSchemaObject)
           return `${exegesis}  ${key}${isRequired ? '' : '?'}: ${propType};`;
         })
         .join('\n');
 
+      // 确定最终类型名称并注册
+      if (modelName && objKey) {
+        // 嵌套 obj 中的 obj：使用父模型名+字段名命名
+        const _name = toCamelCase(`${_modelName}${indexStr}_${objKey}`, true);
+        registerType(_name, props, description);
+        return { type: _name, independent: true };
+      }
+
       if (modelName) {
-        // objKey 存在？ 说明是处理obj中出现了嵌套obj类型,生成类型返回，类型名称
-        if (objKey) {
-          const _name = toCamelCase(`${_modelName}${indexStr}_${objKey}`, true);
-          let _code = `export type ${_name} = {\n${props}\n}`;
+        // 有模型名但非嵌套：返回 tdCode 供上层组装
+        return { type: _modelName, independent: true, tdCode: props };
+      }
 
-
-          /** 注释 */
-          if (description) {
-            _code = _name !== 'AnyObject' ? `/** ${description} */\n${_code}` : _code
-          }
-
-          typeCode.set(_name, _code);
-
-          return {
-            type: _name,
-            independent: true,
-          };
-        }
-        return {
-          type: _modelName,
-          independent: true,
-          tdCode: props,
-        };
-      } else if (
-        handleType === RecursiveType.OBJ ||
-        handleType === RecursiveType.ARR
-      ) {
-        /**
-         * modelName 不存在说明首次，也非ref
-         * 也只有一种情况
-         * 首次处理时就是 object 类型，处理过程出现 object 到这里, 或者是嵌套 arr ， obj -> arr -> obj（这里）
-         * 这里判断 currentObjModelName 是否存在，也有可能是多次嵌套-层级命名
-         * 否则使用  _modelName 作为命名
-         */
+      if (handleType === RecursiveType.OBJ || handleType === RecursiveType.ARR) {
+        // 无模型名的嵌套场景：使用 currentObjModelName 或默认名
         const _name = currentObjModelName
           ? toCamelCase(`${currentObjModelName}${indexStr}_${objKey}`, true)
           : _modelName;
-        let _code = `export type ${_name} = {\n${props}\n}`;
-
-
-        /** 注释 */
-        if (description) {
-          _code = _name !== 'AnyObject' ? `/** ${description} */\n${_code}` : _code
-        }
-
-        typeCode.set(_name, _code);
-
-        return {
-          type: _name,
-          independent: true,
-        };
+        registerType(_name, props, description);
+        return { type: _name, independent: true };
       }
 
-      // 默认处理方式，首次就是 object 类型
-      let code = `export type ${_modelName} = {\n${props}\n}`;
-
-
-      /** 注释 */
-      if (description) {
-        code = _modelName !== 'AnyObject' ? `/** ${description} */\n${code}` : code
-      }
-
-      typeCode.set(_modelName, code);
-
-      return {
-        type: _modelName,
-        independent: true,
-      };
+      // 默认：首次处理的顶层 object 类型
+      registerType(_modelName, props, description);
+      return { type: _modelName, independent: true };
     }
 
     // 兜底类型 any
